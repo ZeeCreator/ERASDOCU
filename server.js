@@ -72,29 +72,44 @@ const HEADERS = {
 
 let cookiesInitialized = false;
 let cookieStringCache = '';
+// ==========================================
+// 🌐 HTTP CLIENT DENGAN CLOUDSCRAPER + RETRY + PROXY
+// ==========================================
 
+let cookiesInitialized = false;
+let cookieStringCache = '';
+
+// Inisialisasi cookie dengan cloudscraper
 async function initializeCookies() {
   if (cookiesInitialized) return;
   
   try {
     console.log('🍪 Mengambil cookie awal dari halaman utama...');
     
-    const body = await cloudscraper.get({
+    const response = await cloudscraper.get({
       uri: BASE_URL,
       headers: {
         'User-Agent': CONFIG.userAgent,
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
         'Accept-Language': 'id,en-US;q=0.9,en;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
         'Connection': 'keep-alive',
-        'Cache-Control': 'max-age=0'
+        'Cache-Control': 'max-age=0',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1'
       },
       timeout: CONFIG.timeout,
       gzip: true,
-      resolveWithFullResponse: true
+      resolveWithFullResponse: true,
+      challenges: 'cloudflare', // Coba bypass Cloudflare
+      followAllRedirects: true,
+      jar: true // Simpan cookie otomatis
     });
 
-    // Ambil cookie dari response headers
-    const setCookie = body.headers['set-cookie'];
+    const setCookie = response.headers['set-cookie'];
     if (setCookie) {
       const newCookies = parseSetCookie(setCookie);
       const current = loadCookies();
@@ -121,30 +136,19 @@ async function initializeCookies() {
   }
 }
 
-function parseSetCookie(header) {
-  const cookies = {};
-  if (Array.isArray(header)) {
-    header = header.join('; ');
-  }
-  const parts = header.split(';');
-  for (const part of parts) {
-    const [key, value] = part.trim().split('=');
-    if (key && value && !key.toLowerCase().includes('path') && !key.toLowerCase().includes('expires') && !key.toLowerCase().includes('domain') && !key.toLowerCase().includes('secure') && !key.toLowerCase().includes('httponly')) {
-      cookies[key] = value;
-    }
-  }
-  return cookies;
-}
-
+// Fungsi fetch utama dengan cloudscraper + fallback fetch
 export async function fetchWithRetry(url, options = {}, retries = CONFIG.maxRetries) {
-  // Inisialisasi cookie jika belum
   await initializeCookies();
 
   const target = url.startsWith('http') ? url : `${BASE_URL}${url.startsWith('/') ? '' : '/'}${url}`;
   let lastError;
   let body = null;
+  let response = null;
 
   const cookieString = cookieStringCache || buildCookieString(loadCookies());
+
+  // Cek proxy dari environment
+  const proxy = process.env.HTTP_PROXY || process.env.HTTPS_PROXY || null;
 
   for (let i = 0; i < retries; i++) {
     try {
@@ -155,43 +159,86 @@ export async function fetchWithRetry(url, options = {}, retries = CONFIG.maxRetr
           ...HEADERS,
           ...options.headers,
           'Cookie': cookieString || options.headers?.Cookie || '',
-          'Referer': options.referer || `${BASE_URL}/`
+          'Referer': options.referer || `${BASE_URL}/`,
+          'Accept-Encoding': 'gzip, deflate, br',
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache'
         },
         timeout: CONFIG.timeout,
         gzip: true,
-        resolveWithFullResponse: true
+        resolveWithFullResponse: true,
+        challenges: 'cloudflare', // Bypass Cloudflare
+        followAllRedirects: true,
+        jar: true, // Cookie jar otomatis
+        agent: proxy ? new (await import('https-proxy-agent')).HttpsProxyAgent(proxy) : undefined
       };
 
-      // Jika ada body (untuk POST), tambahkan
+      // Jika ada body (POST)
       if (options.body) {
         requestOptions.body = options.body;
-        requestOptions.headers['Content-Type'] = options.headers?.['Content-Type'] || 'application/json';
+        if (typeof options.body === 'object') {
+          requestOptions.body = JSON.stringify(options.body);
+          requestOptions.headers['Content-Type'] = 'application/json';
+        }
       }
 
-      const response = await cloudscraper.get(requestOptions);
-
-      // Simpan cookie baru dari response
-      const setCookie = response.headers['set-cookie'];
-      if (setCookie) {
-        const newCookies = parseSetCookie(setCookie);
-        const current = loadCookies();
-        const merged = { ...current, ...newCookies };
-        saveCookies(merged);
-        cookieStringCache = buildCookieString(merged);
-      }
-
+      response = await cloudscraper.get(requestOptions);
       body = response.body;
 
+      // Jika sukses
       if (response.statusCode === 200 || response.statusCode === 201) {
-        // Cek apakah response mengandung Cloudflare challenge
-        if (body.includes('cf-browser-verification') || body.includes('challenge-platform') || body.includes('__cf_chl')) {
-          console.log('⚠️ Cloudflare challenge detected, retrying...');
-          await new Promise(resolve => setTimeout(resolve, CONFIG.retryDelay * (i + 1) * 2));
+        // Cek apakah ada Cloudflare challenge
+        if (body.includes('cf-browser-verification') || 
+            body.includes('challenge-platform') || 
+            body.includes('__cf_chl') ||
+            body.includes('Just a moment')) {
+          console.log('⚠️ Cloudflare challenge detected, waiting and retry...');
+          await new Promise(resolve => setTimeout(resolve, CONFIG.retryDelay * (i + 1) * 3));
+          // Refresh cookie
+          cookiesInitialized = false;
+          await initializeCookies();
           continue;
         }
-        return { ok: true, status: response.statusCode, text: async () => body, json: async () => JSON.parse(body), headers: response.headers };
+
+        // Cek pesan blokir kustom (seperti yang kita lihat)
+        if (body.includes('Anda dilarang mengakses') || body.includes('Dilarang mengakses')) {
+          console.log('🚫 IP diblokir oleh situs. Coba gunakan proxy atau VPN.');
+          // Coba fallback dengan fetch biasa
+          console.log('🔄 Mencoba fallback dengan fetch biasa...');
+          try {
+            const fallbackRes = await fetch(target, {
+              headers: {
+                ...HEADERS,
+                'Cookie': cookieString,
+                'Referer': BASE_URL + '/'
+              }
+            });
+            if (fallbackRes.ok) {
+              const fallbackBody = await fallbackRes.text();
+              return {
+                ok: true,
+                status: 200,
+                text: async () => fallbackBody,
+                json: async () => JSON.parse(fallbackBody),
+                headers: fallbackRes.headers
+              };
+            }
+          } catch (fallbackErr) {
+            console.log('❌ Fallback fetch juga gagal:', fallbackErr.message);
+          }
+          throw new Error('403 - IP diblokir oleh situs. Gunakan proxy atau VPN.');
+        }
+
+        return {
+          ok: true,
+          status: response.statusCode,
+          text: async () => body,
+          json: async () => JSON.parse(body),
+          headers: response.headers
+        };
       }
 
+      // Handle error status
       if (response.statusCode === 429) {
         const waitTime = CONFIG.rateLimitDelay * (i + 1);
         console.log(`⏳ Rate limited, waiting ${waitTime}ms...`);
@@ -200,8 +247,7 @@ export async function fetchWithRetry(url, options = {}, retries = CONFIG.maxRetr
       }
 
       if (response.statusCode === 403 || response.statusCode === 401) {
-        // Coba refresh cookie
-        console.log('🔄 Cookie expired, refreshing...');
+        console.log('🔄 Cookie expired atau akses ditolak, refreshing...');
         cookiesInitialized = false;
         await initializeCookies();
         continue;
@@ -226,7 +272,6 @@ export async function fetchWithRetry(url, options = {}, retries = CONFIG.maxRetr
 
   throw lastError || new Error('Max retries exceeded');
 }
-
 async function fetchHtml(url, options = {}) {
   const res = await fetchWithRetry(url, options);
   return await res.text();
