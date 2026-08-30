@@ -5,6 +5,7 @@ import readline from 'readline';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import path from 'path';
+import cloudscraper from 'cloudscraper';
 
 export const BASE_URL = 'https://x6.sokuja.uk';
 export const AUTHOR_NAME = 'ZEROTZY.ID';
@@ -14,7 +15,7 @@ export const AUTHOR_NAME = 'ZEROTZY.ID';
 // ==========================================
 const CONFIG = {
   userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-  timeout: 15000,
+  timeout: 30000,
   maxRetries: 3,
   retryDelay: 1000,
   rateLimitDelay: 2000,
@@ -53,7 +54,7 @@ function buildCookieString(cookies) {
 }
 
 // ==========================================
-// 🌐 HTTP CLIENT DENGAN RETRY & PROXY
+// 🌐 HTTP CLIENT DENGAN CLOUDSCRAPER + RETRY
 // ==========================================
 const HEADERS = {
   'User-Agent': CONFIG.userAgent,
@@ -69,65 +70,156 @@ const HEADERS = {
   'Cache-Control': 'max-age=0'
 };
 
+let cookiesInitialized = false;
+let cookieStringCache = '';
+
+async function initializeCookies() {
+  if (cookiesInitialized) return;
+  
+  try {
+    console.log('🍪 Mengambil cookie awal dari halaman utama...');
+    
+    const body = await cloudscraper.get({
+      uri: BASE_URL,
+      headers: {
+        'User-Agent': CONFIG.userAgent,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'id,en-US;q=0.9,en;q=0.8',
+        'Connection': 'keep-alive',
+        'Cache-Control': 'max-age=0'
+      },
+      timeout: CONFIG.timeout,
+      gzip: true,
+      resolveWithFullResponse: true
+    });
+
+    // Ambil cookie dari response headers
+    const setCookie = body.headers['set-cookie'];
+    if (setCookie) {
+      const newCookies = parseSetCookie(setCookie);
+      const current = loadCookies();
+      saveCookies({ ...current, ...newCookies });
+      cookieStringCache = buildCookieString({ ...current, ...newCookies });
+      console.log('✅ Cookie berhasil diambil dari Cloudflare');
+    } else {
+      const saved = loadCookies();
+      if (Object.keys(saved).length > 0) {
+        cookieStringCache = buildCookieString(saved);
+        console.log('✅ Menggunakan cookie dari file');
+      } else {
+        console.log('⚠️ Tidak ada cookie, request mungkin tetap ditolak');
+      }
+    }
+    cookiesInitialized = true;
+  } catch (err) {
+    console.error('❌ Gagal ambil cookie:', err.message);
+    const saved = loadCookies();
+    if (Object.keys(saved).length > 0) {
+      cookieStringCache = buildCookieString(saved);
+    }
+    cookiesInitialized = true;
+  }
+}
+
+function parseSetCookie(header) {
+  const cookies = {};
+  if (Array.isArray(header)) {
+    header = header.join('; ');
+  }
+  const parts = header.split(';');
+  for (const part of parts) {
+    const [key, value] = part.trim().split('=');
+    if (key && value && !key.toLowerCase().includes('path') && !key.toLowerCase().includes('expires') && !key.toLowerCase().includes('domain') && !key.toLowerCase().includes('secure') && !key.toLowerCase().includes('httponly')) {
+      cookies[key] = value;
+    }
+  }
+  return cookies;
+}
+
 export async function fetchWithRetry(url, options = {}, retries = CONFIG.maxRetries) {
+  // Inisialisasi cookie jika belum
+  await initializeCookies();
+
   const target = url.startsWith('http') ? url : `${BASE_URL}${url.startsWith('/') ? '' : '/'}${url}`;
   let lastError;
+  let body = null;
 
-  // Load cookies dari file
-  const cookies = loadCookies();
-  const cookieString = buildCookieString(cookies);
+  const cookieString = cookieStringCache || buildCookieString(loadCookies());
 
   for (let i = 0; i < retries; i++) {
     try {
-      const headers = {
-        ...HEADERS,
-        ...options.headers,
-        'Cookie': cookieString || options.headers?.Cookie || '',
-        'Referer': options.referer || `${BASE_URL}/`
+      const requestOptions = {
+        uri: target,
+        method: options.method || 'GET',
+        headers: {
+          ...HEADERS,
+          ...options.headers,
+          'Cookie': cookieString || options.headers?.Cookie || '',
+          'Referer': options.referer || `${BASE_URL}/`
+        },
+        timeout: CONFIG.timeout,
+        gzip: true,
+        resolveWithFullResponse: true
       };
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), CONFIG.timeout);
+      // Jika ada body (untuk POST), tambahkan
+      if (options.body) {
+        requestOptions.body = options.body;
+        requestOptions.headers['Content-Type'] = options.headers?.['Content-Type'] || 'application/json';
+      }
 
-      const res = await fetch(target, {
-        ...options,
-        headers,
-        signal: controller.signal
-      });
-
-      clearTimeout(timeoutId);
+      const response = await cloudscraper.get(requestOptions);
 
       // Simpan cookie baru dari response
-      const setCookie = res.headers.get('set-cookie');
+      const setCookie = response.headers['set-cookie'];
       if (setCookie) {
         const newCookies = parseSetCookie(setCookie);
-        const currentCookies = loadCookies();
-        saveCookies({ ...currentCookies, ...newCookies });
+        const current = loadCookies();
+        const merged = { ...current, ...newCookies };
+        saveCookies(merged);
+        cookieStringCache = buildCookieString(merged);
       }
 
-      if (res.ok) {
-        return res;
+      body = response.body;
+
+      if (response.statusCode === 200 || response.statusCode === 201) {
+        // Cek apakah response mengandung Cloudflare challenge
+        if (body.includes('cf-browser-verification') || body.includes('challenge-platform') || body.includes('__cf_chl')) {
+          console.log('⚠️ Cloudflare challenge detected, retrying...');
+          await new Promise(resolve => setTimeout(resolve, CONFIG.retryDelay * (i + 1) * 2));
+          continue;
+        }
+        return { ok: true, status: response.statusCode, text: async () => body, json: async () => JSON.parse(body), headers: response.headers };
       }
 
-      if (res.status === 429) {
+      if (response.statusCode === 429) {
         const waitTime = CONFIG.rateLimitDelay * (i + 1);
         console.log(`⏳ Rate limited, waiting ${waitTime}ms...`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
         continue;
       }
 
-      if (res.status === 403 || res.status === 401) {
-        throw new Error(`Access denied (HTTP ${res.status}) - mungkin perlu login atau cookie expired`);
+      if (response.statusCode === 403 || response.statusCode === 401) {
+        // Coba refresh cookie
+        console.log('🔄 Cookie expired, refreshing...');
+        cookiesInitialized = false;
+        await initializeCookies();
+        continue;
       }
 
-      throw new Error(`HTTP ${res.status}`);
+      throw new Error(`HTTP ${response.statusCode}`);
 
     } catch (err) {
       lastError = err;
+      console.log(`❌ Attempt ${i + 1} failed:`, err.message);
+      
       if (i < retries - 1) {
-        const delay = CONFIG.retryDelay * (i + 1);
+        const delay = CONFIG.retryDelay * (i + 1) * 2;
         console.log(`⏳ Retry ${i + 1}/${retries} in ${delay}ms...`);
         await new Promise(resolve => setTimeout(resolve, delay));
+        // Refresh cookie sebelum retry
+        cookiesInitialized = false;
+        await initializeCookies();
       }
     }
   }
@@ -135,22 +227,9 @@ export async function fetchWithRetry(url, options = {}, retries = CONFIG.maxRetr
   throw lastError || new Error('Max retries exceeded');
 }
 
-function parseSetCookie(header) {
-  const cookies = {};
-  const parts = header.split(';');
-  for (const part of parts) {
-    const [key, value] = part.trim().split('=');
-    if (key && value && !key.toLowerCase().includes('path') && !key.toLowerCase().includes('expires')) {
-      cookies[key] = value;
-    }
-  }
-  return cookies;
-}
-
 async function fetchHtml(url, options = {}) {
   const res = await fetchWithRetry(url, options);
-  const text = await res.text();
-  return text;
+  return await res.text();
 }
 
 // ==========================================
@@ -251,14 +330,13 @@ function extractJsonLd(html) {
  */
 export async function getHome() {
   const cacheKey = 'home';
-  const cached = getCache(cacheKey, 300000); // 5 menit cache
+  const cached = getCache(cacheKey, 300000);
   if (cached) return cached;
 
   const html = await fetchHtml('/');
   const $ = cheerio.load(html);
   const rsc = extractRscPayload(html);
 
-  // Latest Updates
   const latestUpdates = [];
   const epRegex = /href":"\/([^"]+-episode-[^"]+)".*?"src":"([^"]+)","alt":"([^"]+)".*?children":\["EP ","([^"]+)"\]/g;
   let m;
@@ -275,7 +353,6 @@ export async function getHome() {
     }
   }
 
-  // Popular Anime
   let popularAnime = [];
   const popMatch = rsc.match(/"weekly":\s*(\[[^\]]+\])/);
   if (popMatch) {
@@ -297,7 +374,6 @@ export async function getHome() {
     } catch (_) {}
   }
 
-  // Season Archives
   const seasonArchives = [];
   $('aside button span.font-medium, a[href*="/season/"]').each((_, el) => {
     const text = $(el).text().trim();
@@ -366,7 +442,7 @@ export async function getAnimeDetail(slug) {
   const cleanSlug = slug.replace(/^\/anime\/|\/$/g, '');
   
   const cacheKey = `anime_${cleanSlug}`;
-  const cached = getCache(cacheKey, 600000); // 10 menit
+  const cached = getCache(cacheKey, 600000);
   if (cached) return cached;
 
   const html = await fetchHtml(`/anime/${cleanSlug}/`);
@@ -390,7 +466,6 @@ export async function getAnimeDetail(slug) {
     if (key && val) info[key] = val;
   });
 
-  // Cast
   const cast = [];
   $('a[href*="/cast/"]').each((_, el) => {
     const castName = $(el).text().trim();
@@ -400,7 +475,6 @@ export async function getAnimeDetail(slug) {
     }
   });
 
-  // Episodes
   const episodes = [];
   $('a[href*="-episode-"]').each((_, el) => {
     const $el = $(el);
@@ -421,7 +495,6 @@ export async function getAnimeDetail(slug) {
     }
   });
 
-  // Sort episodes by number
   episodes.sort((a, b) => a.episodeNumber - b.episodeNumber);
 
   const result = formatResponse({
@@ -444,7 +517,7 @@ export async function getAnimeDetail(slug) {
     synopsis,
     cast,
     totalEpisodes: episodes.length,
-    episodes: episodes.slice(0, 50) // Limit untuk respons besar
+    episodes: episodes.slice(0, 50)
   }, `Detail anime '${title}' retrieved successfully`);
 
   setCache(cacheKey, result);
@@ -452,14 +525,14 @@ export async function getAnimeDetail(slug) {
 }
 
 /**
- * 4. EPISODE DETAIL & STREAM MIRRORS (OPTIMIZED)
+ * 4. EPISODE DETAIL & STREAM MIRRORS
  */
 export async function getEpisodeDetail(slug) {
   if (!slug) throw new Error('Episode slug is required');
   const cleanSlug = slug.replace(/^\/|\/$/g, '');
   
   const cacheKey = `episode_${cleanSlug}`;
-  const cached = getCache(cacheKey, 300000); // 5 menit
+  const cached = getCache(cacheKey, 300000);
   if (cached) return cached;
 
   const html = await fetchHtml(`/${cleanSlug}/`);
@@ -476,17 +549,12 @@ export async function getEpisodeDetail(slug) {
   const views = metadata.interactionStatistic?.userInteractionCount || $('span:contains("views")').text().trim() || null;
   const rawThumbnail = metadata.thumbnailUrl || $('img[fetchpriority="high"]').attr('src') || null;
 
-  // Extract episodeId dari Next.js payload
   const epIdMatch = html.match(/episodeId[^\d]{1,10}(\d+)/i);
   const episodeId = epIdMatch ? parseInt(epIdMatch[1], 10) : null;
 
-  // ==========================================
-  // 🎬 STREAM MIRRORS - MULTI SOURCE
-  // ==========================================
   let streamMirrors = [];
   const streamSources = [];
 
-  // Source 1: API video-mirrors (primary)
   if (episodeId) {
     try {
       const mirrorRes = await fetchWithRetry(`${BASE_URL}/api/video-mirrors?e=${episodeId}`, {
@@ -510,25 +578,21 @@ export async function getEpisodeDetail(slug) {
     } catch (_) {}
   }
 
-  // Source 2: Scrape dari HTML (fallback)
   if (streamSources.length === 0) {
     const scrapedStreams = await scrapeStreamsFromHtml(html, episodeId);
     streamSources.push(...scrapedStreams);
   }
 
-  // Source 3: Try to get from m3u8 patterns in scripts
   if (streamSources.length === 0) {
     const scriptStreams = await extractStreamsFromScripts(html);
     streamSources.push(...scriptStreams);
   }
 
-  // Source 4: Try to get from player config
   if (streamSources.length === 0) {
     const playerStreams = await extractPlayerConfig(html);
     streamSources.push(...playerStreams);
   }
 
-  // Deduplicate streams
   const seenUrls = new Set();
   streamMirrors = streamSources.filter(s => {
     if (!s.streamUrl) return false;
@@ -538,9 +602,6 @@ export async function getEpisodeDetail(slug) {
     return true;
   });
 
-  // ==========================================
-  // 📥 DOWNLOAD LINKS
-  // ==========================================
   const downloadLinks = [];
   $('a[href*="sokuja.id/x.php"], a:contains("Download")').each((_, el) => {
     const $el = $(el);
@@ -554,7 +615,6 @@ export async function getEpisodeDetail(slug) {
     }
   });
 
-  // Navigation
   const prevSlug = $('a:contains("Episode Sebelumnya")').attr('href')?.replace(/^\/|\/$/g, '') || null;
   const nextSlug = $('a:contains("Episode Selanjutnya")').attr('href')?.replace(/^\/|\/$/g, '') || null;
 
@@ -583,14 +643,10 @@ export async function getEpisodeDetail(slug) {
   return result;
 }
 
-/**
- * 🔍 Scrape streams dari HTML (fallback)
- */
 async function scrapeStreamsFromHtml(html, episodeId) {
   const $ = cheerio.load(html);
   const streams = [];
 
-  // Cari pola video URL
   const patterns = [
     /"url"\s*:\s*"([^"]+\.(m3u8|mp4)[^"]*)"/gi,
     /"file"\s*:\s*"([^"]+\.(m3u8|mp4)[^"]*)"/gi,
@@ -600,7 +656,6 @@ async function scrapeStreamsFromHtml(html, episodeId) {
     /https?:\/\/[^\s"']+\.(m3u8|mp4)/gi
   ];
 
-  // Cari di script tags
   $('script').each((_, el) => {
     const content = $(el).html() || '';
     patterns.forEach(pattern => {
@@ -627,15 +682,11 @@ async function scrapeStreamsFromHtml(html, episodeId) {
   return streams;
 }
 
-/**
- * 🔍 Ekstrak stream dari script chunks
- */
 async function extractStreamsFromScripts(html) {
   const $ = cheerio.load(html);
   const streams = [];
   const rsc = extractRscPayload(html);
 
-  // Cari di RSC payload
   const rscPatterns = [
     /"streamUrl":"([^"]+\.(m3u8|mp4)[^"]*)"/gi,
     /"embedUrl":"([^"]+\.(m3u8|mp4)[^"]*)"/gi,
@@ -661,14 +712,10 @@ async function extractStreamsFromScripts(html) {
   return streams;
 }
 
-/**
- * 🔍 Ekstrak dari player config
- */
 async function extractPlayerConfig(html) {
   const $ = cheerio.load(html);
   const streams = [];
 
-  // Cari elemen video
   $('video, source').each((_, el) => {
     const src = $(el).attr('src') || $(el).attr('data-src');
     if (src && src.startsWith('http')) {
@@ -941,13 +988,11 @@ export function startServer(port = 3000) {
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
 
-  // Logging middleware
   app.use((req, res, next) => {
     console.log(`📡 ${req.method} ${req.originalUrl}`);
     next();
   });
 
-  // Root
   app.get('/', (req, res) => {
     res.json(formatResponse({
       name: 'SOKUJA REST API Scraper Service',
@@ -969,10 +1014,9 @@ export function startServer(port = 3000) {
         comments: 'GET /api/comments?episodeId=:id&limit=10',
         cookie: 'POST /api/cookie (set cookie)'
       }
-    }, 'SOKUJA REST API by Lann is running'));
+    }, 'SOKUJA REST API is running'));
   });
 
-  // API Routes
   app.get('/api/home', async (req, res) => {
     try {
       res.json(await getHome());
@@ -1054,7 +1098,6 @@ export function startServer(port = 3000) {
     }
   });
 
-  // Endpoint khusus untuk stream
   app.get('/api/stream/:episodeId', async (req, res) => {
     try {
       const episodeId = req.params.episodeId;
@@ -1062,7 +1105,6 @@ export function startServer(port = 3000) {
         return res.status(400).json(formatError('Episode ID is required', 400));
       }
 
-      // Coba API internal
       const mirrorRes = await fetchWithRetry(`${BASE_URL}/api/video-mirrors?e=${episodeId}`, {
         headers: {
           'Referer': `${BASE_URL}/`,
@@ -1091,7 +1133,6 @@ export function startServer(port = 3000) {
     }
   });
 
-  // Set Cookie endpoint
   app.post('/api/cookie', (req, res) => {
     try {
       const { cookies } = req.body;
@@ -1145,7 +1186,6 @@ export function startServer(port = 3000) {
     }
   });
 
-  // Clear cache
   app.delete('/api/cache', (req, res) => {
     try {
       const files = fs.readdirSync(CONFIG.cacheDir);
@@ -1158,12 +1198,10 @@ export function startServer(port = 3000) {
     }
   });
 
-  // 404
   app.use((req, res) => {
     res.status(404).json(formatError(`Endpoint '${req.method} ${req.originalUrl}' not found`, 404));
   });
 
-  // Error handler
   app.use((err, req, res, next) => {
     res.status(500).json(formatError(err?.message || 'Internal Server Error', 500));
   });
@@ -1488,4 +1526,3 @@ if (isDirectExecution) {
 // ==========================================
 // 📤 EKSPOR UNTUK API.JS & VERCEl
 // ==========================================
-
