@@ -5,7 +5,7 @@ import readline from 'readline';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import path from 'path';
-import wreq from 'wreq-js';
+import got from 'got-scraping';
 
 // ==========================================
 // 📌 KONFIGURASI GLOBAL
@@ -22,13 +22,13 @@ const CONFIG = {
   cookieFile: path.join(process.cwd(), 'cookies.json'),
   cacheDir: path.join(process.cwd(), '.cache'),
   cacheTTL: {
-    home: 300000,      // 5 menit
-    search: 300000,    // 5 menit
-    anime: 600000,     // 10 menit
-    episode: 300000,   // 5 menit
-    schedule: 3600000, // 1 jam
-    genres: 86400000,  // 24 jam
-    comments: 60000    // 1 menit
+    home: 300000,
+    search: 300000,
+    anime: 600000,
+    episode: 300000,
+    schedule: 3600000,
+    genres: 86400000,
+    comments: 60000
   }
 };
 
@@ -75,7 +75,7 @@ function parseSetCookie(header) {
 }
 
 // ==========================================
-// 🌐 HTTP CLIENT DENGAN WREQ-JS (OPTIMAL)
+// 🌐 HTTP CLIENT DENGAN GOT-SCRAPING
 // ==========================================
 const HEADERS = {
   'User-Agent': CONFIG.userAgent,
@@ -91,17 +91,24 @@ const HEADERS = {
   'Cache-Control': 'max-age=0'
 };
 
-// State global (hanya satu deklarasi)
 let cookiesReady = false;
 let cookieStringGlobal = '';
 
-// Inisialisasi cookie dari browser simulation
+// Inisialisasi cookie
 async function initCookies() {
   if (cookiesReady) return;
 
   try {
-    console.log('🍪 Init cookie via wreq...');
-    const resp = await wreq.get(BASE_URL, {
+    const saved = loadCookies();
+    if (Object.keys(saved).length > 0) {
+      cookieStringGlobal = buildCookieString(saved);
+      console.log('✅ Cookie loaded from file');
+      cookiesReady = true;
+      return;
+    }
+
+    console.log('🍪 Fetching initial cookie...');
+    const response = await got.get(BASE_URL, {
       headers: {
         'User-Agent': CONFIG.userAgent,
         'Accept': HEADERS.Accept,
@@ -109,41 +116,36 @@ async function initCookies() {
         'Accept-Encoding': HEADERS['Accept-Encoding'],
         'Connection': HEADERS.Connection
       },
-      timeout: CONFIG.timeout,
-      impersonate: 'chrome_124',
+      timeout: { request: CONFIG.timeout },
+      https: { rejectUnauthorized: true },
+      // Ikuti redirect
       followRedirect: true,
-      maxRedirects: 5,
-      resolveWithFullResponse: true
+      // Simulasi browser dengan TLS fingerprint
+      tls: {
+        // Fingerprint mirip Chrome 124
+        ciphers: 'TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256',
+        honorCipherOrder: true
+      }
     });
 
-    const setCookie = resp.headers['set-cookie'];
+    const setCookie = response.headers['set-cookie'];
     if (setCookie) {
       const newCookies = parseSetCookie(setCookie);
-      const existing = loadCookies();
-      saveCookies({ ...existing, ...newCookies });
-      cookieStringGlobal = buildCookieString({ ...existing, ...newCookies });
+      const current = loadCookies();
+      saveCookies({ ...current, ...newCookies });
+      cookieStringGlobal = buildCookieString({ ...current, ...newCookies });
       console.log('✅ Cookie berhasil diambil');
     } else {
-      const saved = loadCookies();
-      if (Object.keys(saved).length > 0) {
-        cookieStringGlobal = buildCookieString(saved);
-        console.log('✅ Pakai cookie dari file');
-      } else {
-        console.log('⚠️ Tidak ada cookie');
-      }
+      console.log('⚠️ No cookie received');
     }
     cookiesReady = true;
   } catch (err) {
     console.error('❌ Gagal init cookie:', err.message);
-    const saved = loadCookies();
-    if (Object.keys(saved).length > 0) {
-      cookieStringGlobal = buildCookieString(saved);
-    }
     cookiesReady = true;
   }
 }
 
-// Fungsi fetch utama dengan retry & impersonate
+// Fungsi fetch utama dengan retry
 export async function fetchWithRetry(url, options = {}, retries = CONFIG.maxRetries) {
   await initCookies();
 
@@ -152,19 +154,26 @@ export async function fetchWithRetry(url, options = {}, retries = CONFIG.maxRetr
 
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
-      const reqOpts = {
-        method: options.method || 'GET',
-        headers: {
-          ...HEADERS,
-          ...options.headers,
-          'Cookie': cookieString,
-          'Referer': options.referer || `${BASE_URL}/`
-        },
-        timeout: CONFIG.timeout,
-        impersonate: attempt === 0 ? 'chrome_124' : attempt === 1 ? 'firefox_124' : 'safari_17_5',
+      const reqHeaders = {
+        ...HEADERS,
+        ...options.headers,
+        'Cookie': cookieString,
+        'Referer': options.referer || `${BASE_URL}/`
+      };
+
+      // Rotasi User-Agent setiap percobaan
+      const userAgents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+      ];
+      reqHeaders['User-Agent'] = userAgents[attempt % userAgents.length];
+
+      const reqOptions = {
+        headers: reqHeaders,
+        timeout: { request: CONFIG.timeout },
         followRedirect: true,
-        maxRedirects: 5,
-        resolveWithFullResponse: true,
+        https: { rejectUnauthorized: true },
         // Retry otomatis untuk error tertentu
         retry: {
           limit: 2,
@@ -174,12 +183,12 @@ export async function fetchWithRetry(url, options = {}, retries = CONFIG.maxRetr
       };
 
       if (options.body) {
-        reqOpts.body = typeof options.body === 'string' ? options.body : JSON.stringify(options.body);
-        reqOpts.headers['Content-Type'] = options.headers?.['Content-Type'] || 'application/json';
+        reqOptions.body = typeof options.body === 'string' ? options.body : JSON.stringify(options.body);
+        reqOptions.headers['Content-Type'] = options.headers?.['Content-Type'] || 'application/json';
       }
 
-      const resp = await (options.method === 'POST' ? wreq.post : wreq.get)(target, reqOpts);
-      const body = resp.body;
+      const response = await got.get(target, reqOptions);
+      const body = response.body;
 
       // ======================================
       // 🛡️ DETEKSI & HANDLE CLOUDFLARE
@@ -202,7 +211,7 @@ export async function fetchWithRetry(url, options = {}, retries = CONFIG.maxRetr
       // 🚫 DETEKSI BLOKIR IP
       // ======================================
       if (body.includes('Anda dilarang mengakses') || body.includes('Dilarang mengakses')) {
-        console.log('🚫 IP diblokir, coba impersonate lain...');
+        console.log('🚫 IP diblokir, coba lagi...');
         if (attempt < retries - 1) {
           await new Promise(r => setTimeout(r, CONFIG.retryDelay * (attempt + 1)));
           continue;
@@ -213,9 +222,9 @@ export async function fetchWithRetry(url, options = {}, retries = CONFIG.maxRetr
       // ======================================
       // ✅ SUKSES
       // ======================================
-      if (resp.statusCode >= 200 && resp.statusCode < 300) {
-        // Update cookie dari response
-        const sc = resp.headers['set-cookie'];
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        // Update cookie
+        const sc = response.headers['set-cookie'];
         if (sc) {
           const newC = parseSetCookie(sc);
           const cur = loadCookies();
@@ -224,33 +233,33 @@ export async function fetchWithRetry(url, options = {}, retries = CONFIG.maxRetr
         }
         return {
           ok: true,
-          status: resp.statusCode,
+          status: response.statusCode,
           text: async () => body,
           json: async () => {
             try { return JSON.parse(body); } catch { return {}; }
           },
-          headers: resp.headers
+          headers: response.headers
         };
       }
 
       // ======================================
       // ⚠️ ERROR STATUS
       // ======================================
-      if (resp.statusCode === 429) {
+      if (response.statusCode === 429) {
         const wait = CONFIG.rateLimitDelay * (attempt + 1);
         console.log(`⏳ Rate limit, wait ${wait}ms`);
         await new Promise(r => setTimeout(r, wait));
         continue;
       }
 
-      if (resp.statusCode === 403 || resp.statusCode === 401) {
+      if (response.statusCode === 403 || response.statusCode === 401) {
         console.log('🔄 Cookie expired, refresh...');
         cookiesReady = false;
         await initCookies();
         continue;
       }
 
-      throw new Error(`HTTP ${resp.statusCode}`);
+      throw new Error(`HTTP ${response.statusCode}`);
 
     } catch (err) {
       console.log(`❌ Attempt ${attempt + 1} error:`, err.message);
@@ -273,7 +282,7 @@ async function fetchHtml(url, options = {}) {
 }
 
 // ==========================================
-// 🗂️ CACHE LAYER (OPTIMAL)
+// 🗂️ CACHE LAYER
 // ==========================================
 function getCacheKey(url) {
   return Buffer.from(url).toString('base64').replace(/[^a-zA-Z0-9]/g, '_');
@@ -860,7 +869,7 @@ export function startServer(port = 3000) {
     res.json(formatResponse({
       name: 'SOKUJA Scraper API',
       creator: AUTHOR_NAME,
-      version: '3.0.0',
+      version: '3.1.0',
       routes: {
         home: 'GET /api/home',
         latest: 'GET /api/latest',
@@ -1029,7 +1038,7 @@ function renderBanner() {
 ║   ███████ ██    ██ █████   ██    ██ ███████ ██████        ║
 ║        ██ ██    ██ ██  ██  ██    ██ ██   ██ ██   ██      ║
 ║   ███████  ██████  ██   ██  ██████  ██   ██ ██   ██      ║
-║            S O K U J A   S C R A P E R  v3.0             ║
+║            S O K U J A   S C R A P E R  v3.1             ║
 ║                  by ${AUTHOR_NAME}                          ║
 ╚═══════════════════════════════════════════════════════════╝${C.reset}
   `);

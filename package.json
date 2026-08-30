@@ -1,29 +1,9 @@
 {
-  "name": "sokuja-scraper",
-  "version": "2.0.0",
-  "description": "SOKUJA REST API Scraper with stream mirrors",
-  "type": "module",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js",
-    "server": "node index.js --server",
-    "dev": "node --watch index.js",
-    "cli": "node index.js",
-    "cache-clear": "node index.js --cache-clear"
-  },
-  "author": "Lann",
-  "license": "MIT",
   "dependencies": {
     "cheerio": "^1.2.0",
-    "cloudscraper": "^4.6.0",
     "cors": "^2.8.6",
     "express": "^5.2.1",
-    "request": "^2.88.2",
-    "request-promise": "^4.2.6",
-    "serverless-http": "^4.0.0",
-    "wreq-js": "^3.2.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "got-scraping": "^4.2.1",
+    "serverless-http": "^4.0.0"
   }
 }
