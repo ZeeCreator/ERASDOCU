@@ -74,10 +74,7 @@ let cookiesInitialized = false;
 let cookieStringCache = '';
 // ==========================================
 // 🌐 HTTP CLIENT DENGAN CLOUDSCRAPER + RETRY + PROXY
-// ==========================================
-
-let cookiesInitialized = false;
-let cookieStringCache = '';
+// =========================================
 
 // Inisialisasi cookie dengan cloudscraper
 async function initializeCookies() {
