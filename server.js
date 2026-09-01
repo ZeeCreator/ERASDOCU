@@ -1133,10 +1133,18 @@ a{color:#a78bfa}
   <div class="player-wrap">
     <video-player>
       <video-skin>
-        <video src="${escSrc}" ${escPoster ? `poster="${escPoster}"` : ''} title="${safeTitle}" playsinline controls autoplay></video>
+        <video src="${escSrc}" ${escPoster ? `poster="${escPoster}"` : ''} title="${safeTitle}" playsinline autoplay></video>
       </video-skin>
     </video-player>
   </div>
+  <style>
+    /* Sembunyikan player dasar / native controls - hanya tampil skin VideoJS */
+    video::-webkit-media-controls,
+    video::-webkit-media-controls-panel,
+    video::-webkit-media-controls-play-button,
+    video::-webkit-media-controls-start-playback-button { display:none !important; opacity:0 !important; }
+    video { outline:none; }
+  </style>
   ` : `
   <div class="form-wrap">
     <div class="form">
