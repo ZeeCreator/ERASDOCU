@@ -14,6 +14,7 @@ import {
   getComments,
   getDesuStream,
   proxyGoogleVideo,
+  generateRinovaPlayer,
   formatResponse,
   formatError,
   loadCookies,
@@ -60,6 +61,7 @@ app.get('/', (req, res) => {
       episodeStream: 'GET /api/stream/:episodeId',
       desustream: 'GET /api/desustream?id=:id&server=otakuwatch5/new OR ?url=:encodedUrl',
       desustreamProxy: 'GET /api/desustream/proxy?url=:googlevideoUrl (anti-403)',
+      rinovaPlayer: 'GET /api/player?id=:id&server=otakuwatch5/new OR ?url=:googlevideo (RINOVA)',
       schedule: 'GET /api/schedule',
       genres: 'GET /api/genres',
       genreAnime: 'GET /api/genres/:slug?page=1',
@@ -281,6 +283,41 @@ app.get('/api/desustream', async (req, res) => {
 
 app.get('/api/desustream/proxy', async (req, res) => {
   await proxyGoogleVideo(req, res);
+});
+
+// RINOVA Custom Player
+app.get('/api/player', async (req, res) => {
+  try {
+    const { id, server, url, title, poster } = req.query;
+    if (!id && !url) {
+      return res.type('html').send(generateRinovaPlayer({ title: 'RINOVA Player' }));
+    }
+    if (url && url.includes('googlevideo.com')) {
+      const decoded = decodeURIComponent(url);
+      const proxyPath = `/api/desustream/proxy?url=${encodeURIComponent(decoded)}`;
+      const host = `${req.protocol}://${req.get('host')}`;
+      return res.type('html').send(generateRinovaPlayer({
+        title: title || 'RINOVA • GoogleVideo',
+        videoUrl: decoded,
+        proxyUrl: `${host}${proxyPath}`,
+        poster,
+        sourceUrl: decoded
+      }));
+    }
+    const data = await getDesuStream({ id, server, url });
+    const gv = data.data?.googleVideoUrl;
+    const host = `${req.protocol}://${req.get('host')}`;
+    const proxyPath = data.data?.proxyUrl || `/api/desustream/proxy?url=${encodeURIComponent(gv)}`;
+    return res.type('html').send(generateRinovaPlayer({
+      title: title || data.data?.title || 'RINOVA Player',
+      videoUrl: gv,
+      proxyUrl: `${host}${proxyPath}`,
+      poster,
+      sourceUrl: data.data?.sourceUrl
+    }));
+  } catch (e) {
+    return res.type('html').send(generateRinovaPlayer({ title: 'Error - '+(e.message||'Gagal') }));
+  }
 });
 
 // Comments
