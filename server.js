@@ -24,6 +24,9 @@ const CONFIG = {
   rateLimitDelay: 3000,
   cookieFile: IS_VERCEL ? path.join('/tmp', 'cookies.json') : path.join(process.cwd(), 'cookies.json'),
   cacheDir: IS_VERCEL ? path.join('/tmp', '.cache') : path.join(process.cwd(), '.cache'),
+  // Proxy untuk bypass IP block di Vercel (isi via ENV PROXY_URL / SOKUJA_PROXY)
+  // Contoh: http://user:pass@proxy.example.com:8080 atau socks5://...
+  proxyUrl: process.env.PROXY_URL || process.env.SOKUJA_PROXY || process.env.HTTPS_PROXY || null,
   cacheTTL: {
     home: 300000,
     search: 300000,
@@ -226,6 +229,8 @@ export async function fetchWithRetry(url, options = {}, retries = CONFIG.maxRetr
         timeout: { request: CONFIG.timeout },
         followRedirect: true,
         https: { rejectUnauthorized: true },
+        // Proxy support untuk bypass IP block di Vercel
+        ...(CONFIG.proxyUrl ? { proxyUrl: CONFIG.proxyUrl } : {}),
         // Retry otomatis untuk error tertentu
         retry: {
           limit: 2,
@@ -263,12 +268,20 @@ export async function fetchWithRetry(url, options = {}, retries = CONFIG.maxRetr
       // 🚫 DETEKSI BLOKIR IP
       // ======================================
       if (body.includes('Anda dilarang mengakses') || body.includes('Dilarang mengakses')) {
-        console.log('🚫 IP diblokir, coba lagi...');
+        console.log(`🚫 IP diblokir (attempt ${attempt + 1})`);
+        // Jika ada proxy, log bahwa proxy tidak membantu / belum di-set
+        if (!CONFIG.proxyUrl) {
+          console.log('💡 Tip: Set ENV PROXY_URL / SOKUJA_PROXY di Vercel untuk bypass IP block');
+        }
         if (attempt < retries - 1) {
           await new Promise(r => setTimeout(r, CONFIG.retryDelay * (attempt + 1)));
           continue;
         }
-        throw new Error('403 - IP diblokir oleh situs (gunakan proxy/VPN)');
+        // Jangan throw 500 polos, kasih error yang bisa di-handle di API layer untuk fallback cache
+        const err = new Error('IP_BLOCKED: Vercel IP diblokir Sokuja. Pasang proxy via ENV PROXY_URL / SOKUJA_PROXY (contoh: http://user:pass@proxy:port)');
+        err.code = 'IP_BLOCKED';
+        err.isBlocked = true;
+        throw err;
       }
 
       // ======================================
@@ -353,6 +366,17 @@ function getCache(key, ttl = 300000) {
   return null;
 }
 
+// Ambil cache stale (tanpa cek TTL) untuk fallback saat IP diblokir
+function getCacheStale(key) {
+  const filePath = path.join(CONFIG.cacheDir, key);
+  try {
+    if (fs.existsSync(filePath)) {
+      return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    }
+  } catch (_) {}
+  return null;
+}
+
 function setCache(key, data) {
   try {
     fs.writeFileSync(path.join(CONFIG.cacheDir, key), JSON.stringify(data));
@@ -371,11 +395,18 @@ export function formatResponse(data, message = 'Success') {
 }
 
 export function formatError(error, statusCode = 500) {
+  // Jika IP diblokir, paksa status 403 biar jelas di client
+  if (error?.isBlocked || error?.code === 'IP_BLOCKED' || String(error?.message||'').includes('IP_BLOCKED') || String(error?.message||'').includes('IP diblokir')) {
+    statusCode = 403;
+  } else if (error?.statusCode) {
+    statusCode = error.statusCode;
+  }
   return {
     status: 'error',
     author: AUTHOR_NAME,
     statusCode,
     message: typeof error === 'string' ? error : error?.message || 'Internal Server Error',
+    hint: String(error?.message||'').includes('IP diblokir') ? 'Set ENV PROXY_URL / SOKUJA_PROXY di Vercel dengan proxy (contoh: http://user:pass@host:port) untuk bypass IP block Vercel' : undefined,
     timestamp: new Date().toISOString()
   };
 }
@@ -411,6 +442,10 @@ function extractJsonLd(html) {
   return results;
 }
 
+function isBlockedError(err) {
+  return err?.isBlocked || err?.code === 'IP_BLOCKED' || String(err?.message||'').includes('IP diblokir') || String(err?.message||'').includes('IP_BLOCKED');
+}
+
 // ==========================================
 // 🎯 CORE SCRAPER FUNCTIONS
 // ==========================================
@@ -421,7 +456,21 @@ export async function getHome() {
   const cached = getCache(key, getCacheTTL('home'));
   if (cached) return cached;
 
-  const html = await fetchHtml('/');
+  let html;
+  try {
+    html = await fetchHtml('/');
+  } catch (e) {
+    if (isBlockedError(e)) {
+      const stale = getCacheStale(key);
+      if (stale) {
+        console.log('⚠️ IP diblokir, return cache stale untuk home');
+        return { ...stale, _stale: true, _blocked: true, message: stale.message + ' (stale - IP diblokir, pasang PROXY_URL)' };
+      }
+      e.statusCode = 403;
+      throw e;
+    }
+    throw e;
+  }
   const $ = cheerio.load(html);
   const rsc = extractRscPayload(html);
 

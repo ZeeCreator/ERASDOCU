@@ -65,12 +65,16 @@ app.get('/', (req, res) => {
   }, 'SOKUJA REST API by ZeroTzy.ID is running on Vercel'));
 });
 
-// Home
+// Home - handle IP blocked dengan return 403 yang jelas
 app.get('/api/home', async (req, res) => {
   try {
-    res.json(await getHome());
+    const data = await getHome();
+    // Jika data stale karena IP diblokir, tetap return 200 tapi kasih flag
+    if (data?._blocked) return res.json(data);
+    res.json(data);
   } catch (err) {
-    res.status(500).json(formatError(err));
+    const e = formatError(err);
+    res.status(e.statusCode || 500).json(e);
   }
 });
 
@@ -84,7 +88,7 @@ app.get('/api/latest', async (req, res) => {
       latest
     }, 'Latest episode updates retrieved'));
   } catch (err) {
-    res.status(500).json(formatError(err));
+    res.status(formatError(err).statusCode||500).json(formatError(err));
   }
 });
 
@@ -98,7 +102,7 @@ app.get('/api/popular', async (req, res) => {
       popular
     }, 'Popular anime retrieved'));
   } catch (err) {
-    res.status(500).json(formatError(err));
+    res.status(formatError(err).statusCode||500).json(formatError(err));
   }
 });
 
@@ -120,7 +124,7 @@ app.get('/api/anime/list-mode', async (req, res) => {
   try {
     res.json(await getAnimeListMode());
   } catch (err) {
-    res.status(500).json(formatError(err));
+    res.status(formatError(err).statusCode||500).json(formatError(err));
   }
 });
 
@@ -141,7 +145,7 @@ app.get('/api/anime', async (req, res) => {
     const { status, type, order, page } = req.query;
     res.json(await getAnimeFilter({ status, type, order, page }));
   } catch (err) {
-    res.status(500).json(formatError(err));
+    res.status(formatError(err).statusCode||500).json(formatError(err));
   }
 });
 
@@ -188,7 +192,7 @@ app.get('/api/stream/:episodeId', async (req, res) => {
     }, 'No streams found'));
 
   } catch (err) {
-    res.status(500).json(formatError(err));
+    res.status(formatError(err).statusCode||500).json(formatError(err));
   }
 });
 
@@ -207,7 +211,7 @@ app.post('/api/cookie', (req, res) => {
       note: 'Cookies tersimpan di memory + /tmp (akan hilang saat cold start, gunakan ENV SOKUJA_COOKIES untuk permanen)'
     }, 'Cookies saved successfully'));
   } catch (err) {
-    res.status(500).json(formatError(err));
+    res.status(formatError(err).statusCode||500).json(formatError(err));
   }
 });
 
@@ -223,7 +227,7 @@ app.get('/api/cookie', (req, res) => {
       preview: Object.fromEntries(Object.entries(cookies).map(([k,v]) => [k, String(v).slice(0,15)+'...']))
     }, 'Cookie status OK'));
   } catch (err) {
-    res.status(500).json(formatError(err));
+    res.status(formatError(err).statusCode||500).json(formatError(err));
   }
 });
 
@@ -232,7 +236,7 @@ app.get('/api/schedule', async (req, res) => {
   try {
     res.json(await getSchedule());
   } catch (err) {
-    res.status(500).json(formatError(err));
+    res.status(formatError(err).statusCode||500).json(formatError(err));
   }
 });
 
@@ -241,7 +245,7 @@ app.get('/api/genres', async (req, res) => {
   try {
     res.json(await getGenres());
   } catch (err) {
-    res.status(500).json(formatError(err));
+    res.status(formatError(err).statusCode||500).json(formatError(err));
   }
 });
 
@@ -263,7 +267,7 @@ app.get('/api/comments', async (req, res) => {
     const { episodeId, animeId, limit, cursor } = req.query;
     res.json(await getComments({ episodeId, animeId, limit, cursor }));
   } catch (err) {
-    res.status(500).json(formatError(err));
+    res.status(formatError(err).statusCode||500).json(formatError(err));
   }
 });
 
@@ -284,12 +288,12 @@ app.delete('/api/cache', (req, res) => {
           }
           return res.json(formatResponse({ cleared: 0, location: cacheDir }, 'Cache empty'));
         } catch (e) {
-          return res.status(500).json(formatError(e));
+          return res.status(formatError(e).statusCode||500).json(formatError(e));
         }
       });
     });
   } catch (e) {
-    res.status(500).json(formatError(e));
+    res.status(formatError(e).statusCode||500).json(formatError(e));
   }
 });
 
