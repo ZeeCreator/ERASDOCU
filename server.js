@@ -5,7 +5,7 @@ import readline from 'readline';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import path from 'path';
-import got from 'got-scraping';
+import { gotScraping as got } from 'got-scraping';
 
 // ==========================================
 // 📌 KONFIGURASI GLOBAL
