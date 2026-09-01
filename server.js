@@ -13,14 +13,17 @@ import got from 'got-scraping';
 export const BASE_URL = 'https://x6.sokuja.uk';
 export const AUTHOR_NAME = 'ZEROTZY.ID';
 
+// Deteksi Vercel (filesystem read-only, hanya /tmp yang writable)
+const IS_VERCEL = !!process.env.VERCEL;
+
 const CONFIG = {
   userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
   timeout: 30000,
   maxRetries: 5,
   retryDelay: 2000,
   rateLimitDelay: 3000,
-  cookieFile: path.join(process.cwd(), 'cookies.json'),
-  cacheDir: path.join(process.cwd(), '.cache'),
+  cookieFile: IS_VERCEL ? path.join('/tmp', 'cookies.json') : path.join(process.cwd(), 'cookies.json'),
+  cacheDir: IS_VERCEL ? path.join('/tmp', '.cache') : path.join(process.cwd(), '.cache'),
   cacheTTL: {
     home: 300000,
     search: 300000,
@@ -32,27 +35,75 @@ const CONFIG = {
   }
 };
 
-// Buat direktori cache
-if (!fs.existsSync(CONFIG.cacheDir)) {
-  fs.mkdirSync(CONFIG.cacheDir, { recursive: true });
-}
+// Buat direktori cache (handle Vercel yang read-only)
+try {
+  if (!fs.existsSync(CONFIG.cacheDir)) {
+    fs.mkdirSync(CONFIG.cacheDir, { recursive: true });
+  }
+} catch (_) {}
 
 // ==========================================
-// 🍪 MANAJEMEN COOKIE
+// 🍪 MANAJEMEN COOKIE - VERCEL READY
 // ==========================================
+// Cookie default yang lolos Cloudflare/Sokuja (dari user 2026-09-01)
+export const DEFAULT_COOKIES = {
+  "_ga": "GA1.1.64070199.1788269406",
+  "_ga_4EKKHF0VF9": "GS2.1.s1788269405$o1$g1$t1788270151$j60$l0$h0$dO6V7TTjzhxoqlwHSrbIS6n0YeGgCdtZoYw",
+  "c_ref_4736762": "https%3A%2F%2Fsokuja.id%2F",
+  "HstCfa4736762": "1788269405250",
+  "HstCla4736762": "1788269405250",
+  "HstCmu4736762": "1788269405250",
+  "HstCns4736762": "1",
+  "HstCnv4736762": "1",
+  "HstPn4736762": "1",
+  "HstPt4736762": "1",
+  "vid2": "f78eb90a-3fde-4344-b937-8741c1416939"
+};
+
+// Memory fallback untuk Vercel (karena /tmp bisa hilang tiap cold start)
+let memoryCookies = { ...DEFAULT_COOKIES };
+
+// Jika ada ENV var SOKUJA_COOKIES (format JSON string), merge
+try {
+  if (process.env.SOKUJA_COOKIES) {
+    const envCookies = JSON.parse(process.env.SOKUJA_COOKIES);
+    memoryCookies = { ...memoryCookies, ...envCookies };
+    console.log('✅ Cookie loaded dari ENV SOKUJA_COOKIES');
+  }
+} catch (e) {
+  console.warn('⚠️ Gagal parse SOKUJA_COOKIES env:', e.message);
+}
+
 export function loadCookies() {
+  // Di Vercel, prioritaskan memory + file /tmp
+  if (IS_VERCEL) {
+    try {
+      if (fs.existsSync(CONFIG.cookieFile)) {
+        const fileCookies = JSON.parse(fs.readFileSync(CONFIG.cookieFile, 'utf8'));
+        memoryCookies = { ...memoryCookies, ...fileCookies };
+      }
+    } catch (_) {}
+    return { ...memoryCookies };
+  }
+  // Lokal: baca file + fallback ke default
   try {
     if (fs.existsSync(CONFIG.cookieFile)) {
-      return JSON.parse(fs.readFileSync(CONFIG.cookieFile, 'utf8'));
+      const fileCookies = JSON.parse(fs.readFileSync(CONFIG.cookieFile, 'utf8'));
+      // Merge default + file (file menang)
+      return { ...DEFAULT_COOKIES, ...fileCookies };
     }
   } catch (_) {}
-  return {};
+  return { ...DEFAULT_COOKIES };
 }
 
 export function saveCookies(cookies) {
+  // Selalu update memory
+  memoryCookies = { ...memoryCookies, ...cookies };
   try {
-    fs.writeFileSync(CONFIG.cookieFile, JSON.stringify(cookies, null, 2));
-  } catch (_) {}
+    fs.writeFileSync(CONFIG.cookieFile, JSON.stringify(memoryCookies, null, 2));
+  } catch (_) {
+    // Di Vercel write bisa gagal, tapi memory sudah terupdate
+  }
 }
 
 function buildCookieString(cookies) {
@@ -92,7 +143,8 @@ const HEADERS = {
 };
 
 let cookiesReady = false;
-let cookieStringGlobal = '';
+// Init langsung dari DEFAULT_COOKIES biar di Vercel tidak perlu fetch
+let cookieStringGlobal = buildCookieString(loadCookies());
 
 // Inisialisasi cookie
 async function initCookies() {
@@ -102,7 +154,7 @@ async function initCookies() {
     const saved = loadCookies();
     if (Object.keys(saved).length > 0) {
       cookieStringGlobal = buildCookieString(saved);
-      console.log('✅ Cookie loaded from file');
+      console.log(`✅ Cookie loaded (${Object.keys(saved).length} cookies) - ${IS_VERCEL ? 'Vercel memory' : 'file'}`);
       cookiesReady = true;
       return;
     }

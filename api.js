@@ -74,26 +74,28 @@ app.get('/api/home', async (req, res) => {
   }
 });
 
-// Latest
+// Latest - fix field: server.js pakai 'latest' bukan 'latestUpdates'
 app.get('/api/latest', async (req, res) => {
   try {
     const home = await getHome();
+    const latest = home.data?.latest || home.data?.latestUpdates || [];
     res.json(formatResponse({
-      total: home.data?.latestUpdates?.length || 0,
-      latestUpdates: home.data?.latestUpdates || []
+      total: latest.length,
+      latest
     }, 'Latest episode updates retrieved'));
   } catch (err) {
     res.status(500).json(formatError(err));
   }
 });
 
-// Popular
+// Popular - fix field: server.js pakai 'popular' bukan 'popularAnime'
 app.get('/api/popular', async (req, res) => {
   try {
     const home = await getHome();
+    const popular = home.data?.popular || home.data?.popularAnime || [];
     res.json(formatResponse({
-      total: home.data?.popularAnime?.length || 0,
-      popularAnime: home.data?.popularAnime || []
+      total: popular.length,
+      popular
     }, 'Popular anime retrieved'));
   } catch (err) {
     res.status(500).json(formatError(err));
@@ -190,7 +192,7 @@ app.get('/api/stream/:episodeId', async (req, res) => {
   }
 });
 
-// Set Cookie
+// Set Cookie - Vercel ready (update memory + /tmp)
 app.post('/api/cookie', (req, res) => {
   try {
     const { cookies } = req.body;
@@ -201,8 +203,25 @@ app.post('/api/cookie', (req, res) => {
     saveCookies({ ...current, ...cookies });
     res.json(formatResponse({
       saved: Object.keys(cookies),
-      total: Object.keys(loadCookies()).length
+      total: Object.keys(loadCookies()).length,
+      note: 'Cookies tersimpan di memory + /tmp (akan hilang saat cold start, gunakan ENV SOKUJA_COOKIES untuk permanen)'
     }, 'Cookies saved successfully'));
+  } catch (err) {
+    res.status(500).json(formatError(err));
+  }
+});
+
+// Debug cookie (cek cookie aktif)
+app.get('/api/cookie', (req, res) => {
+  try {
+    const cookies = loadCookies();
+    const keys = Object.keys(cookies);
+    res.json(formatResponse({
+      total: keys.length,
+      keys,
+      // jangan expose value penuh untuk keamanan, cuma preview
+      preview: Object.fromEntries(Object.entries(cookies).map(([k,v]) => [k, String(v).slice(0,15)+'...']))
+    }, 'Cookie status OK'));
   } catch (err) {
     res.status(500).json(formatError(err));
   }
@@ -248,11 +267,30 @@ app.get('/api/comments', async (req, res) => {
   }
 });
 
-// Clear cache (hanya untuk development, di Vercel tidak akan berfungsi karena file system read-only)
+// Clear cache - sekarang support Vercel (/tmp/.cache)
 app.delete('/api/cache', (req, res) => {
-  res.json(formatResponse({
-    message: 'Cache clear only works in local environment'
-  }, 'Not available on Vercel'));
+  try {
+    // Hapus cache di /tmp/.cache untuk Vercel
+    import('fs').then(fsMod => {
+      const fs = fsMod.default;
+      import('path').then(pathMod => {
+        const path = pathMod.default;
+        const cacheDir = process.env.VERCEL ? '/tmp/.cache' : path.join(process.cwd(), '.cache');
+        try {
+          if (fs.existsSync(cacheDir)) {
+            const files = fs.readdirSync(cacheDir);
+            files.forEach(f => { try { fs.unlinkSync(path.join(cacheDir, f)); } catch(_){} });
+            return res.json(formatResponse({ cleared: files.length, location: cacheDir }, 'Cache cleared'));
+          }
+          return res.json(formatResponse({ cleared: 0, location: cacheDir }, 'Cache empty'));
+        } catch (e) {
+          return res.status(500).json(formatError(e));
+        }
+      });
+    });
+  } catch (e) {
+    res.status(500).json(formatError(e));
+  }
 });
 
 // 404
@@ -268,7 +306,9 @@ app.use((err, req, res, next) => {
 // ==========================================
 // 📤 EXPORT untuk Vercel
 // ==========================================
+// Vercel butuh export default untuk serverless
 export const handler = serverless(app);
+export const config = { api: { bodyParser: false } };
 
 // Untuk local testing (optional)
 // Jika dijalankan langsung: node api.js
