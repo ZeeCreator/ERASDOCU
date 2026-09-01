@@ -1088,15 +1088,15 @@ export function generateRinovaPlayer({ title = 'RINOVA Player', videoUrl = null,
   const hasVideo = !!(videoUrl || proxyUrl);
   const src = proxyUrl || videoUrl || '';
   const safeTitle = String(title).replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-  const jsSrc = JSON.stringify(src);
-  const jsTitle = JSON.stringify(safeTitle);
-  const jsPoster = JSON.stringify(poster || '');
+  const escSrc = String(src).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+  const escPoster = poster ? String(poster).replace(/"/g,'&quot;') : '';
   return `<!DOCTYPE html>
 <html lang="id">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${safeTitle} - RINOVA</title>
+<script type="module" src="https://cdn.jsdelivr.net/npm/@videojs/html@10.0.0-beta.31/cdn/video.js"><\/script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{height:100%}
@@ -1105,9 +1105,11 @@ body{background:#000;color:#e5e7eb;font-family:Inter,system-ui,sans-serif;displa
 .logo{font-weight:900;letter-spacing:3px;font-size:18px;background:linear-gradient(90deg,#a78bfa,#f472b6,#60a5fa);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
 .logo span{font-weight:400;font-size:9px;letter-spacing:5px;display:block;margin-top:-3px;-webkit-text-fill-color:#6b7280}
 .badge{font-size:10px;background:#111827;border:1px solid #1f2937;padding:4px 8px;border-radius:20px;color:#9ca3af}
-.wrap{flex:1;display:flex;flex-direction:column;min-height:0}
-.player-wrap{flex:1;background:#000;position:relative;min-height:0}
-#player{width:100%;height:100%;min-height:60vh}
+.wrap{flex:1;display:flex;flex-direction:column;min-height:0;background:#000}
+.player-wrap{flex:1;display:flex;min-height:0}
+video-player{flex:1;display:flex;width:100%}
+video-skin{flex:1}
+video{width:100%;height:100%}
 .form-wrap{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;gap:16px;background:#0a0a0f}
 .form{width:min(100%,560px);background:#111827;border:1px solid #1f2937;border-radius:12px;padding:20px;display:flex;flex-direction:column;gap:12px}
 .form h2{font-size:14px;color:#c4b5fd}
@@ -1117,35 +1119,28 @@ body{background:#000;color:#e5e7eb;font-family:Inter,system-ui,sans-serif;displa
 .btn-primary{background:linear-gradient(90deg,#7c3aed,#ec4899);color:#fff;width:100%}
 .btn-ghost{background:#1f2937;color:#d1d5db;border:1px solid #374151}
 .row{display:flex;gap:8px}
-.footer{padding:10px;text-align:center;font-size:11px;color:#4b5563;border-top:1px solid #111827;flex-shrink:0}
+.footer{padding:10px;text-align:center;font-size:11px;color:#4b5563;border-top:1px solid #111827;flex-shrink:0;background:#0a0a0f}
 a{color:#a78bfa}
 </style>
-<script src="https://playerjs.com/player.js"><\/script>
 </head>
 <body>
 <header class="header">
-  <div class="logo">RINOVA<span>PLAYER • PLAYERJS</span></div>
+  <div class="logo">RINOVA<span>PLAYER • VIDEOJS</span></div>
   <div class="badge">PROXY ANTI 403</div>
 </header>
 <div class="wrap">
   ${hasVideo ? `
   <div class="player-wrap">
-    <div id="player"></div>
+    <video-player>
+      <video-skin>
+        <video src="${escSrc}" ${escPoster ? `poster="${escPoster}"` : ''} title="${safeTitle}" playsinline controls autoplay></video>
+      </video-skin>
+    </video-player>
   </div>
-  <script>
-    var player = new Playerjs({
-      id: "player",
-      file: ${jsSrc},
-      title: ${jsTitle},
-      poster: ${jsPoster},
-      autoplay: 1,
-      muted: 0
-    });
-  <\/script>
   ` : `
   <div class="form-wrap">
     <div class="form">
-      <h2>▶️ RINOVA Player — PlayerJS</h2>
+      <h2>▶️ RINOVA Player — VideoJS HTML</h2>
       <input id="inp" placeholder="Paste id desustream atau googlevideo URL..." />
       <button class="btn btn-primary" onclick="playInput()">Putar Sekarang</button>
       <div class="row">
@@ -1155,21 +1150,21 @@ a{color:#a78bfa}
       <p style="font-size:11px;color:#6b7280">Param: <code>?id=ID&server=otakuwatch5/new</code> atau <code>?url=ENCODED_URL</code></p>
     </div>
   </div>
-  <script>
-  function playInput(){
-    var v=document.getElementById('inp').value.trim();
-    if(!v) return;
-    if(v.includes('googlevideo.com') || v.includes('desustream.com')){
-      location.href='/api/player?url='+encodeURIComponent(v);
-    } else {
-      location.href='/api/player?id='+encodeURIComponent(v);
-    }
-  }
-  function demo(){ location.href='/api/player?id=TGdRNDRNazNrcGl6MUN4RG81MlRlOUQvYnFDTm1wZVZ6ZGxGMjRnTVdndz0='; }
-  <\/script>
   `}
 </div>
-<footer class="footer">RINOVA Player • PlayerJS • Proxy anti-403 • by ZEROTZY.ID</footer>
+<footer class="footer">RINOVA Player • @videojs/html • Proxy anti-403 • by ZEROTZY.ID</footer>
+${hasVideo ? '' : `<script>
+function playInput(){
+  var v=document.getElementById('inp').value.trim();
+  if(!v) return;
+  if(v.includes('googlevideo.com') || v.includes('desustream.com')){
+    location.href='/api/player?url='+encodeURIComponent(v);
+  } else {
+    location.href='/api/player?id='+encodeURIComponent(v);
+  }
+}
+function demo(){ location.href='/api/player?id=TGdRNDRNazNrcGl6MUN4RG81MlRlOUQvYnFDTm1wZVZ6ZGxGMjRnTVdndz0='; }
+<\/script>`}
 </body>
 </html>`;
 }
