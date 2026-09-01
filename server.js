@@ -928,6 +928,159 @@ export async function getAnimeByGenre(genreSlug, page = 1) {
   return result;
 }
 
+// ==========================================
+// 🎬 DESUSTREAM SCRAPER - GOOGLEVIDEO ANTI 403
+// ==========================================
+const DESUSTREAM_BASE = 'https://desustream.com';
+
+export async function getDesuStream({ id, server = 'otakuwatch5/new', url } = {}) {
+  if (!id && !url) throw new Error('Parameter id atau url diperlukan');
+
+  let targetUrl;
+  if (url) {
+    targetUrl = url.startsWith('http') ? url : `${DESUSTREAM_BASE}${url.startsWith('/')?'':'/'}${url}`;
+  } else {
+    const cleanServer = server.replace(/^\/|\/$/g,'');
+    targetUrl = `${DESUSTREAM_BASE}/dstream/${cleanServer}/index.php?id=${encodeURIComponent(id)}`;
+  }
+
+  const key = `desu_${Buffer.from(targetUrl).toString('base64').slice(0,40)}`;
+  const cached = getCache(key, 300000);
+  if (cached && !cached._stale) return cached;
+
+  // Fetch halaman desustream dengan header browser
+  const html = await fetchWithRetry(targetUrl, {
+    headers: {
+      'Referer': 'https://otakudesu.cloud/',
+      'Origin': DESUSTREAM_BASE,
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Sec-Fetch-Dest': 'iframe',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'cross-site'
+    },
+    referer: 'https://otakudesu.cloud/'
+  }).then(r => r.text()).catch(async _ => {
+    // Fallback direct got tanpa fetchWithRetry (bypass cookie logic sokuja)
+    const res = await got.get(targetUrl, {
+      headers: {
+        'User-Agent': CONFIG.userAgent,
+        'Referer': 'https://otakudesu.cloud/',
+        'Accept': 'text/html,*/*',
+        ...(CONFIG.proxyUrl ? { proxyUrl: CONFIG.proxyUrl } : {})
+      },
+      timeout: { request: 15000 }
+    });
+    return res.body;
+  });
+
+  const $ = cheerio.load(html);
+  // Cari <source src="https://...googlevideo.com/...">
+  let googleVideoUrl = $('video source').attr('src') || $('source[type="video/mp4"]').attr('src') || null;
+
+  if (!googleVideoUrl) {
+    // Regex fallback
+    const m = html.match(/https:\/\/[^"'\s]+\.googlevideo\.com\/[^"'\s]+/);
+    if (m) googleVideoUrl = m[0].replace(/&amp;/g, '&');
+  }
+  if (!googleVideoUrl) {
+    // Coba cari di script
+    const sm = html.match(/src\s*[:=]\s*["'](https:[^"']+googlevideo[^"']+)["']/);
+    if (sm) googleVideoUrl = sm[1].replace(/&amp;/g, '&');
+  }
+
+  if (!googleVideoUrl) throw new Error('GoogleVideo URL tidak ditemukan di desustream');
+
+  // Bersihkan & decode
+  googleVideoUrl = googleVideoUrl.replace(/&amp;/g, '&').trim();
+
+  // Info tambahan
+  const title = $('title').text().trim() || 'Desustream Video';
+  const quality = title.match(/(\d{3,4}p)/)?.[1] || '360p';
+
+  // Buat proxy URL agar client tidak kena 403 (IP mismatch)
+  // Client harus pakai proxy endpoint ini, bukan direct googlevideo
+  const proxyUrlPath = `/api/desustream/proxy?url=${encodeURIComponent(googleVideoUrl)}`;
+
+  const result = formatResponse({
+    sourceUrl: targetUrl,
+    googleVideoUrl,
+    proxyUrl: proxyUrlPath,
+    title,
+    quality,
+    type: 'video/mp4',
+    headersRequired: {
+      Referer: 'https://desustream.com/',
+      'User-Agent': CONFIG.userAgent,
+      Range: 'bytes=0-'
+    },
+    note: 'Gunakan proxyUrl untuk menghindari 403 (IP mismatch). Direct googleVideoUrl akan 403 jika IP client beda dengan IP server yang extract.',
+    expire: (() => { try { const u=new URL(googleVideoUrl); return u.searchParams.get('expire') ? new Date(parseInt(u.searchParams.get('expire'))*1000).toISOString() : null; } catch{ return null; }})()
+  }, 'Desustream OK');
+
+  setCache(key, result);
+  return result;
+}
+
+// Helper untuk streaming proxy - dipanggil dari route
+export async function proxyGoogleVideo(req, res) {
+  const videoUrl = req.query.url || req.query.src;
+  if (!videoUrl) return res.status(400).json(formatError('Query ?url= googlevideo diperlukan', 400));
+
+  let decodedUrl;
+  try { decodedUrl = decodeURIComponent(videoUrl); } catch { decodedUrl = videoUrl; }
+
+  if (!decodedUrl.includes('googlevideo.com')) {
+    return res.status(400).json(formatError('URL harus googlevideo.com', 400));
+  }
+
+  // Headers untuk bypass 403
+  const headers = {
+    'User-Agent': CONFIG.userAgent,
+    'Referer': 'https://desustream.com/',
+    'Origin': 'https://desustream.com',
+    'Accept': '*/*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Connection': 'keep-alive',
+    'Sec-Fetch-Dest': 'video',
+    'Sec-Fetch-Mode': 'no-cors',
+    'Sec-Fetch-Site': 'cross-site'
+  };
+  // Forward Range header penting untuk seeking
+  if (req.headers.range) headers['Range'] = req.headers.range;
+
+  try {
+    const stream = got.stream(decodedUrl, {
+      headers,
+      ...(CONFIG.proxyUrl ? { proxyUrl: CONFIG.proxyUrl } : {}),
+      timeout: { request: 30000 },
+      followRedirect: true
+    });
+
+    // Forward status & header dari googlevideo
+    stream.on('response', (gRes) => {
+      const passHeaders = ['content-type','content-length','content-range','accept-ranges','cache-control','expires','last-modified','etag'];
+      passHeaders.forEach(h => {
+        if (gRes.headers[h]) res.setHeader(h, gRes.headers[h]);
+      });
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Headers', 'Range');
+      res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
+      if (gRes.headers['content-range']) res.status(206);
+      else res.status(gRes.statusCode || 200);
+    });
+
+    stream.on('error', (err) => {
+      console.error('Proxy stream error:', err.message);
+      if (!res.headersSent) res.status(500).json(formatError('Gagal proxy googlevideo: '+err.message));
+      else res.end();
+    });
+
+    stream.pipe(res);
+  } catch (err) {
+    res.status(500).json(formatError(err));
+  }
+}
+
 // 9. COMMENTS
 export async function getComments({ episodeId, animeId, limit = 10, cursor = null } = {}) {
   const params = new URLSearchParams();
@@ -970,7 +1123,7 @@ export function startServer(port = 3000) {
     res.json(formatResponse({
       name: 'SOKUJA Scraper API',
       creator: AUTHOR_NAME,
-      version: '3.1.0',
+      version: '3.2.0',
       routes: {
         home: 'GET /api/home',
         latest: 'GET /api/latest',
@@ -981,6 +1134,8 @@ export function startServer(port = 3000) {
         animeDetail: 'GET /api/anime/:slug',
         episodeDetail: 'GET /api/episode/:slug',
         stream: 'GET /api/stream/:episodeId',
+        desustream: 'GET /api/desustream?id=:id&server=otakuwatch5/new OR ?url=:encodedUrl',
+        desustreamProxy: 'GET /api/desustream/proxy?url=:googlevideoUrl (anti 403 streaming)',
         schedule: 'GET /api/schedule',
         genres: 'GET /api/genres',
         genreAnime: 'GET /api/genres/:slug?page=1',
@@ -1095,6 +1250,24 @@ export function startServer(port = 3000) {
       const { episodeId, animeId, limit, cursor } = req.query;
       res.json(await getComments({ episodeId, animeId, limit, cursor }));
     } catch (e) { res.status(500).json(formatError(e)); }
+  });
+
+  // Desustream - extract googlevideo
+  app.get('/api/desustream', async (req, res) => {
+    try {
+      const { id, server, url } = req.query;
+      if (!id && !url) return res.status(400).json(formatError('Query ?id= atau ?url= diperlukan. Contoh: /api/desustream?id=TGdRNDRNazNrcGl6MUN4RG81MlRlOUQvYnFDTm1wZVZ6ZGxGMjRnTVdndz0=&server=otakuwatch5/new', 400));
+      const data = await getDesuStream({ id, server, url });
+      // Tambahkan full proxy URL dengan host
+      const host = `${req.protocol}://${req.get('host')}`;
+      if (data.data?.proxyUrl) data.data.proxyFullUrl = `${host}${data.data.proxyUrl}`;
+      res.json(data);
+    } catch (e) { res.status(formatError(e).statusCode||500).json(formatError(e)); }
+  });
+
+  // Desustream - proxy streaming anti 403
+  app.get('/api/desustream/proxy', async (req, res) => {
+    await proxyGoogleVideo(req, res);
   });
 
   app.delete('/api/cache', (req, res) => {

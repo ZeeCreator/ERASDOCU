@@ -12,6 +12,8 @@ import {
   getGenres,
   getAnimeByGenre,
   getComments,
+  getDesuStream,
+  proxyGoogleVideo,
   formatResponse,
   formatError,
   loadCookies,
@@ -44,7 +46,7 @@ app.get('/', (req, res) => {
   res.json(formatResponse({
     name: 'SOKUJA REST API Scraper Service',
     creator: AUTHOR_NAME,
-    version: '2.0.0',
+    version: '3.2.0',
     deployed: 'Vercel',
     routes: {
       home: 'GET /api/home',
@@ -56,6 +58,8 @@ app.get('/', (req, res) => {
       animeDetail: 'GET /api/anime/:slug',
       episodeDetail: 'GET /api/episode/:slug',
       episodeStream: 'GET /api/stream/:episodeId',
+      desustream: 'GET /api/desustream?id=:id&server=otakuwatch5/new OR ?url=:encodedUrl',
+      desustreamProxy: 'GET /api/desustream/proxy?url=:googlevideoUrl (anti-403)',
       schedule: 'GET /api/schedule',
       genres: 'GET /api/genres',
       genreAnime: 'GET /api/genres/:slug?page=1',
@@ -259,6 +263,24 @@ app.get('/api/genres/:slug', async (req, res) => {
   } catch (err) {
     res.status(404).json(formatError(err, 404));
   }
+});
+
+// Desustream - extract googlevideo anti-403
+app.get('/api/desustream', async (req, res) => {
+  try {
+    const { id, server, url } = req.query;
+    if (!id && !url) return res.status(400).json(formatError('Query ?id= atau ?url= diperlukan. Contoh: /api/desustream?id=TGdRNDRNazNrcGl6MUN4RG81MlRlOUQvYnFDTm1wZVZ6ZGxGMjRnTVdndz0=&server=otakuwatch5/new',400));
+    const data = await getDesuStream({ id, server, url });
+    const host = `${req.protocol}://${req.get('host')}`;
+    if (data.data?.proxyUrl) data.data.proxyFullUrl = `${host}${data.data.proxyUrl}`;
+    res.json(data);
+  } catch (err) {
+    res.status(formatError(err).statusCode||500).json(formatError(err));
+  }
+});
+
+app.get('/api/desustream/proxy', async (req, res) => {
+  await proxyGoogleVideo(req, res);
 });
 
 // Comments
